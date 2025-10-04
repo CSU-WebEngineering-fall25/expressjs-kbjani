@@ -1,84 +1,158 @@
 const fetch = require('node-fetch');
+const NodeCache = require('node-cache');
 
 class XKCDService {
   constructor() {
     this.baseUrl = 'https://xkcd.com';
-    this.cache = new Map();
-    this.cacheTimeout = 5 * 60 * 1000; // 5 minutes
+    this.cache = new NodeCache({ stdTTL: 3600 });
   }
 
+  // Get the latest comic
   async getLatest() {
-    const cacheKey = 'latest';
+    const cacheKey = 'comic-latest';
     const cached = this.cache.get(cacheKey);
     
-    if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
-      return cached.data;
+    if (cached) {
+      return cached;
     }
 
     try {
       const response = await fetch(`${this.baseUrl}/info.0.json`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-      
-      const comic = await response.json();
-      const processedComic = this.processComic(comic);
-      
-      this.cache.set(cacheKey, {
-        data: processedComic,
-        timestamp: Date.now()
-      });
-      
+      if (!response.ok) throw new Error('Failed to fetch latest comic');
+
+      const data = await response.json();
+      const processedComic = this.processComic(data);
+      this.cache.set(cacheKey, processedComic);
       return processedComic;
     } catch (error) {
+
+      if (error.message === 'Failed to fetch latest comic') {
+        throw error;
+      }
       throw new Error(`Failed to fetch latest comic: ${error.message}`);
     }
   }
 
-  // TODO: Implement getById method
+  // Get a comic by ID
   async getById(id) {
-    // Validate that id is a positive integer
-    // Check cache first using key `comic-${id}`
-    // Fetch from https://xkcd.com/${id}/info.0.json
-    // Handle 404 errors appropriately (throw 'Comic not found')
-    // Handle other HTTP errors
-    // Process and cache the result
-    // Return processed comic
-    throw new Error('getById method not implemented');
+
+    if (!id || isNaN(id) || id < 1 || !Number.isInteger(Number(id))) {
+      throw new Error('Invalid comic ID');
+    }
+
+    const numericId = parseInt(id);
+    const cacheKey = `comic-${numericId}`;
+    
+
+    const cached = this.cache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    try {
+      const response = await fetch(`${this.baseUrl}/${numericId}/info.0.json`);
+      if (response.status === 404) throw new Error('Comic not found');
+      if (!response.ok) throw new Error(`Failed to fetch comic ${numericId}`);
+
+      const data = await response.json();
+      const processedComic = this.processComic(data);
+      this.cache.set(cacheKey, processedComic);
+      return processedComic;
+    } catch (error) {
+      if (error.message === 'Comic not found') {
+        throw error;
+      }
+      throw new Error(`Failed to fetch comic ${numericId}: ${error.message}`);
+    }
   }
 
-  // TODO: Implement getRandom method
+  // Get a random comic
   async getRandom() {
-    // Get the latest comic to know the maximum ID
-    // Generate random number between 1 and latest.id
-    // Use getById to fetch the random comic
-    // Handle any errors appropriately
-    throw new Error('getRandom method not implemented');
+    try {
+      const latest = await this.getLatest();
+      const randomId = Math.floor(Math.random() * latest.num) + 1;
+      return await this.getById(randomId);
+    } catch (error) {
+      throw new Error(`Failed to fetch random comic: ${error.message}`);
+    }
   }
 
-  // TODO: Implement search method
+  // Search comics with pagination
   async search(query, page = 1, limit = 10) {
-    // This is a simplified search implementation
-    // Get latest comic to know the range
-    // Calculate offset from page and limit
-    // Search through recent comics (e.g., last 100) for title/transcript matches
-    // Return object with: query, results array, total, pagination object
-    throw new Error('search method not implemented');
+    if (!query || typeof query !== 'string' || query.length < 1 || query.length > 100) {
+      throw new Error('Query must be between 1 and 100 characters');
+    }
+
+    const searchQuery = query.toLowerCase();
+    const numericPage = parseInt(page);
+    const numericLimit = parseInt(limit);
+    const offset = (numericPage - 1) * numericLimit;
+
+    try {
+      const latest = await this.getLatest();
+      const maxId = latest.num;
+      
+
+      const startId = Math.max(1, maxId - 99);
+      const searchPromises = [];
+      
+      for (let id = startId; id <= maxId; id++) {
+        searchPromises.push(this.getById(id).catch(() => null));
+      }
+      
+      const comics = await Promise.all(searchPromises);
+      const validComics = comics.filter(comic => comic !== null);
+      
+
+      const matchingComics = validComics.filter(comic => {
+        const titleMatch = comic.title.toLowerCase().includes(searchQuery);
+        const transcriptMatch = comic.transcript && comic.transcript.toLowerCase().includes(searchQuery);
+        const altMatch = comic.alt && comic.alt.toLowerCase().includes(searchQuery);
+        
+        return titleMatch || transcriptMatch || altMatch;
+      });
+      
+
+      const total = matchingComics.length;
+      const paginatedResults = matchingComics.slice(offset, offset + numericLimit);
+      
+      return {
+        query: searchQuery,
+        results: paginatedResults,
+        total,
+        pagination: {
+          page: numericPage,
+          limit: numericLimit,
+          totalPages: Math.ceil(total / numericLimit),
+          hasNext: offset + numericLimit < total,
+          hasPrev: numericPage > 1,
+          offset: offset
+        }
+      };
+    } catch (error) {
+      throw new Error(`Search failed: ${error.message}`);
+    }
   }
 
-  processComic(comic) {
+
+  processComic(comicData) {
     return {
-      id: comic.num,
-      title: comic.title,
-      img: comic.img,
-      alt: comic.alt,
-      transcript: comic.transcript || '',
-      year: comic.year,
-      month: comic.month,
-      day: comic.day,
-      safe_title: comic.safe_title
+      id: comicData.num,
+      title: comicData.title,
+      safe_title: comicData.safe_title,
+      date: `${comicData.year}-${comicData.month}-${comicData.day}`,
+      img: comicData.img,
+      alt: comicData.alt,
+      transcript: comicData.transcript || '',
+      news: comicData.news || '',
+      link: comicData.link || '',
+      num: comicData.num,
+      year: comicData.year,
+      month: comicData.month,
+      day: comicData.day
     };
   }
 }
+
 
 module.exports = new XKCDService();
